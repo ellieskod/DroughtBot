@@ -180,7 +180,14 @@ void resetTransfer() {
 
 void processData(const ReceivedMessage& message) {
     
-    //only the connected node can send data
+    //handle button press input from the user
+    //bypass normal data handling for button presses
+    if(buttonPress) {
+        serialInput(buttonPress);
+        return;
+    }
+
+    //only the connected node can send data (except for input from buttons  )
     if (!nodeConnected || !sameAddress(message.senderAddress, connectedNode)) {
         sendTargetedControl(message.senderAddress, MessageType::Busy);
         return;

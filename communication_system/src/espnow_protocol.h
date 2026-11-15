@@ -20,6 +20,9 @@ enum class MessageType : uint8_t {
     Closed,
     Data,
     Ack,
+    Request = 10,
+    RequestResponse = 11,
+    NodeAssignment = 12,
 };
 
 #pragma pack(push, 1)
@@ -39,6 +42,25 @@ struct AckMessage {
 struct TargetedControlMessage {
     MessageType type;
     uint8_t targetAddress[6];
+};
+
+struct RequestMessage {
+    MessageType type;
+    uint32_t requestId;
+    uint8_t commandLength;
+    uint8_t paramLength;
+};
+
+struct ResponseMessage {
+    MessageType type;
+    uint32_t requestId;
+    uint8_t responseLength;
+    uint8_t response[240];
+};
+
+struct NodeAssignmentMessage {
+    MessageType type;
+    uint8_t nodeId;
 };
 #pragma pack(pop)
 

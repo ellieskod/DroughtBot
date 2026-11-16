@@ -59,6 +59,7 @@ def handle_payload(payload):
         import json
         data = json.loads(payload.decode('utf-8'))
         print(f"POSTing JSON data: {data}")
+        #edit this based on endpoint names or match data types with endpoints
         requests.post(f'http://localhost/{type(data).__name__}', json=data)
     except:
         pass

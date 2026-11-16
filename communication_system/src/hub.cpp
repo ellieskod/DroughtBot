@@ -18,6 +18,8 @@ uint32_t droppedMessages = 0;
 bool hubReady = false;
 bool nodeConnected = false;
 uint8_t connectedNode[6] = {};
+uint8_t connectedNodeId = 0;
+uint8_t nextNodeId = 1;
 bool transferActive = false;
 uint32_t activeTransferId = 0;
 uint32_t activeChunkCount = 0;
@@ -25,6 +27,13 @@ uint32_t nextChunkIndex = 0;
 bool hasLastChunk = false;
 uint32_t lastTransferId = 0;
 uint32_t lastChunkIndex = 0;
+uint32_t nextRequestId = 1;
+volatile bool responseReceived = false;
+volatile uint32_t responseRequestId = 0;
+volatile uint8_t responseLength = 0;
+volatile uint8_t responseData[240] = {};
+bool streamingResponse = false;
+uint32_t streamingResponseId = 0;
 
 void onReceive(const esp_now_recv_info_t* senderInfo,
                const uint8_t* data, int length) {
@@ -87,6 +96,78 @@ void sendAck(const uint8_t address[6], uint32_t transferId,
     }
 }
 
+void sendNodeAssignment(const uint8_t address[6], uint8_t nodeId) {
+    const NodeAssignmentMessage msg = {MessageType::NodeAssignment, nodeId};
+    const esp_err_t result = esp_now_send(address,
+                                          reinterpret_cast<const uint8_t*>(&msg),
+                                          sizeof(msg));
+    if (result != ESP_OK) {
+        Serial0.printf("Could not send node assignment: %s\n", esp_err_to_name(result));
+    }
+}
+
+bool sendRequest(const char* command, const uint8_t* params, size_t paramLength,
+                 uint32_t timeoutMs) {
+    if (!nodeConnected) {
+        return false;
+    }
+
+    size_t commandLength = command ? strlen(command) : 0;
+    if (commandLength > 240 || paramLength > 240 ||
+        commandLength + paramLength + sizeof(RequestMessage) > ESP_NOW_MAX_DATA_LEN) {
+        return false;
+    }
+
+    uint32_t requestId = nextRequestId++;
+    uint8_t packet[ESP_NOW_MAX_DATA_LEN];
+    
+    RequestMessage* req = reinterpret_cast<RequestMessage*>(packet);
+    req->type = MessageType::Request;
+    req->requestId = requestId;
+    req->commandLength = static_cast<uint8_t>(commandLength);
+    req->paramLength = static_cast<uint8_t>(paramLength);
+    
+    size_t offset = sizeof(RequestMessage);
+    
+    if (commandLength > 0) {
+        memcpy(packet + offset, command, commandLength);
+        offset += commandLength;
+    }
+    
+    if (paramLength > 0) {
+        memcpy(packet + offset, params, paramLength);
+        offset += paramLength;
+    }
+    
+    responseReceived = false;
+    responseRequestId = 0;
+    responseLength = 0;
+    memset((void*)responseData, 0, sizeof(responseData));
+    streamingResponse = false;
+    streamingResponseId = 0;
+    
+    const esp_err_t result = esp_now_send(connectedNode, packet, offset);
+    if (result != ESP_OK) {
+        Serial0.printf("Could not send request: %s\n", esp_err_to_name(result));
+        return false;
+    }
+    
+    const uint32_t start = millis();
+    while (millis() - start < timeoutMs && !responseReceived) {
+        delay(10);
+    }
+    
+    if (!responseReceived || responseRequestId != requestId) {
+        return false;
+    }
+    
+    return true;
+}
+
+bool isResponseStreaming() {
+    return streamingResponse && streamingResponseId != 0;
+}
+
 void resetTransfer() {
     
     //forget the current transfer
@@ -96,15 +177,24 @@ void resetTransfer() {
     nextChunkIndex = 0;
 }
 
+
 void processData(const ReceivedMessage& message) {
-    //only the connected node can send data
+    
+    //handle button press input from the user
+    //bypass normal data handling for button presses
+    if(buttonPress) {
+        serialInput(buttonPress);
+        return;
+    }
+
+    //only the connected node can send data (except for input from buttons  )
     if (!nodeConnected || !sameAddress(message.senderAddress, connectedNode)) {
         sendTargetedControl(message.senderAddress, MessageType::Busy);
         return;
     }
 
     if (message.length <= sizeof(DataHeader)) {
-        Serial0.println("Dropped empty or malformed data chunk");
+        Serial0.println("Dropped empty or faulty data chunk");
         return;
     }
 
@@ -118,6 +208,7 @@ void processData(const ReceivedMessage& message) {
 
     if (hasLastChunk && header.transferId == lastTransferId &&
         header.chunkIndex == lastChunkIndex) {
+        
         //the ack may have been lost, so ack the retry without writing twice
         sendAck(message.senderAddress, header.transferId, header.chunkIndex);
         return;
@@ -129,6 +220,7 @@ void processData(const ReceivedMessage& message) {
     }
 
     if (!transferActive) {
+        
         //a transfer always starts with chunk zero
         if (header.chunkIndex != 0) {
             Serial0.println("Dropped out-of-order data chunk");
@@ -181,16 +273,20 @@ void processMessage(const ReceivedMessage& message) {
         //let the current node back in, or accept a new one if we're free
         if (nodeConnected && sameAddress(message.senderAddress, connectedNode)) {
             sendControl(message.senderAddress, MessageType::Ready);
+            sendNodeAssignment(message.senderAddress, connectedNodeId);
 
         } else if (!nodeConnected && addPeer(message.senderAddress)) {
             memcpy(connectedNode, message.senderAddress, sizeof(connectedNode));
+            connectedNodeId = nextNodeId++;
             nodeConnected = true;
             resetTransfer();
             hasLastChunk = false;
-            Serial0.printf("Node connected: %02X:%02X:%02X:%02X:%02X:%02X\n",
+            Serial0.printf("Node connected: %02X:%02X:%02X:%02X:%02X:%02X (ID: %u)\n",
                            connectedNode[0], connectedNode[1], connectedNode[2],
-                           connectedNode[3], connectedNode[4], connectedNode[5]);
+                           connectedNode[3], connectedNode[4], connectedNode[5],
+                           connectedNodeId);
             sendControl(message.senderAddress, MessageType::Ready);
+            sendNodeAssignment(message.senderAddress, connectedNodeId);
 
         } else {
             sendTargetedControl(message.senderAddress, MessageType::Busy);
@@ -217,11 +313,32 @@ void processMessage(const ReceivedMessage& message) {
         return;
     }
 
+    if (type == MessageType::RequestResponse && 
+        message.length >= sizeof(ResponseMessage)) {
+        ResponseMessage* resp = reinterpret_cast<ResponseMessage*>(message.bytes);
+        
+        responseRequestId = resp->requestId;
+        responseLength = resp->responseLength;
+        
+        if (responseLength > 0 && responseLength <= sizeof(responseData)) {
+            memcpy((void*)responseData, resp->response, responseLength);
+        }
+        
+        //check if response is streaming 
+        if (responseLength >= 9 && memcmp(resp->response, "streaming", 9) == 0) {
+            streamingResponse = true;
+            streamingResponseId = resp->requestId;
+        }
+        
+        responseReceived = true;
+        return;
+    }
+
     if (type == MessageType::Data) {
         processData(message);
     }
 }
-}  // namespace
+} 
 
 void setup() {
     Serial.begin(115200);

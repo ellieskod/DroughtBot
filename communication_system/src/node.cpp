@@ -13,6 +13,7 @@ constexpr uint8_t kMaxChunkAttempts = 5;
 volatile bool hubDiscovered = false;
 uint8_t hubAddress[6] = {};
 uint8_t nodeAddress[6] = {};
+uint8_t nodeId = 0;
 volatile uint8_t controlResponse = 0;
 volatile bool ackReceived = false;
 volatile uint32_t ackTransferId = 0;
@@ -21,6 +22,16 @@ bool radioReady = false;
 bool sessionOpen = false;
 bool reconnectEnabled = true;
 uint32_t nextTransferId = 1;
+
+typedef uint8_t (*RequestHandler)(const char* command, const uint8_t* params, 
+                                   size_t paramLength);
+
+RequestHandler userRequestHandler = nullptr;
+volatile bool requestReceived = false;
+volatile uint32_t requestId = 0;
+char requestCommand[241];
+uint8_t requestParams[240];
+uint8_t requestParamLength = 0;
 
 void onReceive(const esp_now_recv_info_t* senderInfo,
                const uint8_t* data, int length) {
@@ -41,7 +52,7 @@ void onReceive(const esp_now_recv_info_t* senderInfo,
         return;
     }
 
-    //ignore replies from anyone but our hub
+    //ignore replies from anyone but hub
     if (!hubDiscovered || !sameAddress(senderInfo->src_addr, hubAddress)) {
         return;
     }
@@ -65,11 +76,51 @@ void onReceive(const esp_now_recv_info_t* senderInfo,
     if (type == MessageType::Ack && length == sizeof(AckMessage)) {
         AckMessage ack = {};
         memcpy(&ack, data, sizeof(ack));
+
         //only count an ack for the chunk we are waiting on
         if (ack.transferId == ackTransferId &&
             ack.chunkIndex == ackChunkIndex) {
             ackReceived = true;
         }
+        return;
+    }
+
+    if (type == MessageType::NodeAssignment && 
+        length == sizeof(NodeAssignmentMessage)) {
+        NodeAssignmentMessage* assign = reinterpret_cast<NodeAssignmentMessage*>(
+            const_cast<uint8_t*>(data));
+
+        nodeId = assign->nodeId;
+        Serial.printf("Assigned node ID: %u\n", nodeId);
+        return;
+    }
+
+    if (type == MessageType::Request && 
+        length >= sizeof(RequestMessage)) {
+        RequestMessage* req = reinterpret_cast<RequestMessage*>(
+            const_cast<uint8_t*>(data));
+        
+        requestId = req->requestId;
+        uint8_t commandLen = req->commandLength;
+        requestParamLength = req->paramLength;
+        
+        size_t offset = sizeof(RequestMessage);
+        
+        if (commandLen > 0 && length >= offset + commandLen) {
+            memcpy(requestCommand, data + offset, commandLen);
+            requestCommand[commandLen] = '\0';
+            offset += commandLen;
+        } else {
+            requestCommand[0] = '\0';
+        }
+        
+        if (requestParamLength > 0 && 
+            length >= offset + requestParamLength) {
+            memcpy(requestParams, data + offset, requestParamLength);
+        }
+        
+        requestReceived = true;
+        return;
     }
 }
 
@@ -97,7 +148,105 @@ void waitBeforeRetry(uint32_t& window) {
     delay(wait);
     window = nextBackoffWindow(window);
 }
-}//namespace
+
+void processRequest() {
+    if (!requestReceived || userRequestHandler == nullptr) {
+        return;
+    }
+
+    uint8_t status = userRequestHandler(requestCommand, requestParams, 
+                                        requestParamLength);
+    
+    // Handler returns status code (0-255)
+    // if you want to include response data, encode it in the status
+    // or use sendResponseWithData() instead
+    
+    uint8_t packet[sizeof(ResponseMessage)];
+    ResponseMessage* resp = reinterpret_cast<ResponseMessage*>(packet);
+    resp->type = MessageType::RequestResponse;
+    resp->requestId = requestId;
+    resp->responseLength = 0;  
+    
+    esp_now_send(hubAddress, packet, sizeof(ResponseMessage));
+    
+    requestReceived = false;
+}
+}
+
+uint8_t getNodeId() {
+    return nodeId;
+}
+
+void setRequestHandler(RequestHandler handler) {
+    userRequestHandler = handler;
+}
+
+void handleRequest() {
+    if (requestReceived) {
+        processRequest();
+    }
+}
+
+bool sendResponseData(uint32_t requestIdToRespond, const uint8_t* data, size_t length) {
+    if (length > 240 || data == nullptr) {
+        return false;
+    }
+    
+    uint8_t packet[sizeof(ResponseMessage)];
+    ResponseMessage* resp = reinterpret_cast<ResponseMessage*>(packet);
+    resp->type = MessageType::RequestResponse;
+    resp->requestId = requestIdToRespond;
+    resp->responseLength = static_cast<uint8_t>(length);
+    memcpy(resp->response, data, length);
+    
+    return esp_now_send(hubAddress, packet, sizeof(ResponseMessage)) == ESP_OK;
+}
+
+bool sendResponseString(uint32_t requestId, const char* str) {
+    if (str == nullptr) {
+        return false;
+    }
+    size_t len = strlen(str);
+    return sendResponseData(requestId, (const uint8_t*)str, len);
+}
+
+bool sendOk(uint32_t requestId) {
+    return sendResponseString(requestId, "ok");
+}
+
+bool sendOkWithValue(uint32_t requestId, uint32_t value) {
+    char buf[20];
+    snprintf(buf, sizeof(buf), "ok:%lu", (unsigned long)value);
+    return sendResponseString(requestId, buf);
+}
+
+bool sendError(uint32_t requestId) {
+    return sendResponseString(requestId, "error");
+}
+
+bool sendErrorWithCode(uint32_t requestId, uint8_t code) {
+    char buf[20];
+    snprintf(buf, sizeof(buf), "error:%u", (unsigned)code);
+    return sendResponseString(requestId, buf);
+}
+
+bool sendStreamingResponse(uint32_t requestIdToStream, const uint8_t* data, size_t length) {
+    if (!sessionOpen || data == nullptr || length == 0) {
+        return false;
+    }
+    
+    //send "streaming" flag so hub knows data is coming
+    uint8_t packet[sizeof(ResponseMessage)];
+    ResponseMessage* resp = reinterpret_cast<ResponseMessage*>(packet);
+    resp->type = MessageType::RequestResponse;
+    resp->requestId = requestIdToStream;
+    resp->responseLength = 9;
+    memcpy(resp->response, "streaming", 9);
+    
+    esp_now_send(hubAddress, packet, sizeof(ResponseMessage));
+    
+    return sendData(data, length);
+}
 
 void setup() {
     Serial.begin(115200);
@@ -240,7 +389,7 @@ bool sendData(const uint8_t* data, size_t length) {
             return false;
         }
 
-        //next chunk after the hub confirms this chunk
+        //next chunk after the hub confirms/acks this chunk
         offset += payloadLength;
     }
 

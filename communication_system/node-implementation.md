@@ -4,7 +4,7 @@
 
 ```cpp
 struct RequestMessage {
-    MessageType type;      MessageType::Request
+    MessageType type;      
     uint32_t requestId;    // unique ID
     uint8_t commandLength; // bytes in the command string
     uint8_t paramLength;   // num bytes in the parameters

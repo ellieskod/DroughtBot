@@ -8,7 +8,7 @@ bool sendData(const uint8_t* data, size_t length);
 bool closeCommunication();
 uint8_t getNodeId();
 
-typedef uint8_t (*RequestHandler)(const char* command, const uint8_t* params);
+typedef void (*RequestHandler)(uint32_t requestId, const char* command, const uint8_t* params);
 
 void setRequestHandler(RequestHandler handler);
 void handleRequest();

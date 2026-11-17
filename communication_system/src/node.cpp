@@ -202,14 +202,6 @@ bool sendResponseData(uint32_t requestIdToRespond, const uint8_t* data, size_t l
     return esp_now_send(hubAddress, packet, sizeof(ResponseMessage)) == ESP_OK;
 }
 
-bool sendResponseString(uint32_t requestId, const char* str) {
-    if (str == nullptr) {
-        return false;
-    }
-    size_t len = strlen(str);
-    return sendResponseData(requestId, (const uint8_t*)str, len);
-}
-
 bool sendOk(uint32_t requestId) {
     return sendResponseString(requestId, "ok");
 }
@@ -220,9 +212,6 @@ bool sendOkWithValue(uint32_t requestId, uint32_t value) {
     return sendResponseString(requestId, buf);
 }
 
-bool sendError(uint32_t requestId) {
-    return sendResponseString(requestId, "error");
-}
 
 bool sendErrorWithCode(uint32_t requestId, uint8_t code) {
     char buf[20];

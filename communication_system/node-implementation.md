@@ -53,7 +53,7 @@ uint8_t myCommandHandler(const char* command, const uint8_t* params, size_t para
         return 0;  //success
     }
     else if (strcmp(command, "read_sensor") == 0) {
-        int reading = readMoistureSensor();
+        int reading = readWeight();
         
         //snd the sensor reading back to hub
         sendOkWithValue(requestId, reading);

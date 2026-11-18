@@ -4,7 +4,7 @@
 
 ```cpp
 struct RequestMessage {
-    MessageType type;      // MessageType::Request
+    MessageType type;      
     uint32_t requestId;    // unique ID
     uint8_t commandLength; // bytes in the command string
     // actual data follows: [command string] + [2 bytes params]
@@ -52,7 +52,7 @@ void myCommandHandler(uint32_t requestId, const char* command, const uint8_t* pa
         sendOk(requestId);
     }
     else if (strcmp(command, "read_sensor") == 0) {
-        int reading = readMoistureSensor();
+        int reading = readWeight();
         
         //send the sensor reading back to hub
         sendResponseValue(requestId, reading);
